@@ -24,23 +24,28 @@ def get_elements(xml_file):
     urls=[]
     contentType=[]
     name=[]
+    length=[]
     with open(xml_file) as fic:
         line=fic.readlines()[0].split('<entry>')
         for fragment in line[1:]:
             urls.append(fragment.split('<id>')[1].split('</id>')[0])
             contentType.append(fragment.split('<d:ContentType>')[1].split('</d:ContentType>')[0])
             name.append(fragment.split('<title type="text">')[1].split('</title>')[0])
+            length.append(int(fragment.split('<d:ContentLength>')[1].split('</d:ContentLength>')[0]))
             #print name
     os.remove(xml_file)
-    return urls,contentType,name
+    return urls,contentType,name,length
 
 # recursively download file tree of a Granule
 def download_tree(rep,xml_file,wg,auth,wg_opt,value):
-    urls,types,names=get_elements(xml_file)
+    urls,types,names,length=get_elements(xml_file)
+    #print 
+    #print urls,types,names,length
+
     for i in range(len(urls)):
-        urls[i]=urls[i].replace("eu/odata","eu/apihub/odata") #patch the url
-        if types[i]=='Item' and not 'ECMWFT' in names[i]:
+        if length[i]==0: # then it is a directory
             nom_rep="%s/%s"%(rep,names[i])
+            print nom_rep
             if not(os.path.exists(nom_rep)):
                 os.mkdir(nom_rep)
             commande_wget='%s %s %s%s "%s"'%(wg,auth,wg_opt,'files.xml',urls[i]+"/Nodes")
@@ -49,15 +54,14 @@ def download_tree(rep,xml_file,wg,auth,wg_opt,value):
             while os.path.getsize("files.xml")==0 : #in case of "bad gateway error"
                 os.system(commande_wget)
             download_tree(nom_rep,'files.xml',wg,auth,wg_opt,value)
-        else:
+        else: # a file
             commande_wget='%s %s %s%s "%s"'%(wg,auth,wg_opt,rep+'/'+names[i],urls[i]+'/'+value)
             os.system(commande_wget)
-            while os.path.getsize(rep+'/'+names[i])==0 : #retry download in case of a Bad Gateway error"
-                os.system(commande_wget)
+            #while os.path.getsize(rep+'/'+names[i])==0 : #retry download in case of a Bad Gateway error"
+            #    os.system(commande_wget)
 
 def get_dir(dir_name,dir_url,product_dir_name,wg,auth,wg_opt,value):
     dir=("%s/%s"%(product_dir_name,dir_name))
-    dir_url=dir_url.replace("eu/odata","eu/apihub/odata")  #patch the url
     if not(os.path.exists(dir)) :
         os.mkdir(dir)
     commande_wget='%s %s %s%s "%s"'%(wg,auth,wg_opt,'temp.xml',dir_url)
@@ -110,6 +114,8 @@ else:
             help="end ingestion date, fmt('2015-12-23')",default=None)     
     parser.add_option("-d", "--start_date", dest="start_date", action="store", type="string", \
             help="start date, fmt('20151222')",default=None)
+    parser.add_option("-l", "--level", dest="level", action="store", type="string", \
+            help="L1C,L2A...",default="L1C")
     parser.add_option("-f","--end_date", dest="end_date", action="store", type="string", \
             help="end date, fmt('20151223')",default=None)
     parser.add_option("-o","--orbit", dest="orbit", action="store", type="int", \
@@ -186,7 +192,7 @@ if options.downloader=="aria2":
     else:
         value="$value"
 else :
-    wg="wget --no-check-certificate"
+    wg="wget --no-check-certificate "
     auth='--user="%s" --password="%s"'%(account,passwd)
     search_output="--output-document=query_results.xml"
     wg_opt=" --continue --output-document="
@@ -194,7 +200,12 @@ else :
         value="\\$value"
     else:
         value="$value"
-
+producttype=None
+if options.sentinel=="S2":
+    if options.level=="L1C":
+        producttype="S2MSI1C"
+    elif  options.level=="L2A":
+        producttype="S2MSI2Ap"
 if geom=='point':
     if sys.platform.startswith('linux') or sys.platform.startswith('darwin'):
         query_geom='footprint:\\"Intersects(%f,%f)\\"'%(options.lat,options.lon)
@@ -229,6 +240,10 @@ if options.start_ingest_date!=None or options.end_ingest_date!=None:
     query_date=" ingestiondate:[%s TO %s]"%(start_ingest_date,end_ingest_date)
     query=query+query_date
 
+
+if producttype !=None:    
+    query_producttype=" producttype:%s "%producttype
+    query=query+query_producttype
     
 # acquisition date    
 
@@ -258,7 +273,7 @@ else:
 
 
 #=======================
-# parse catalog output
+# parse catalog output»
 #=======================
 for i in range(len(request_list)):
     os.system(request_list[i])
@@ -292,36 +307,38 @@ for i in range(len(request_list)):
 
             # print what has been found
             print "\n==============================================="
+            print date_prod,start_date,end_date
             print filename
             print link
             if options.dhus==True:
                 link=link.replace("apihub","dhus")
 
+               
             if options.sentinel.find("S2") >=0 :
                 for node in prod.getElementsByTagName("double"):
                     (name,field)=node.attributes.items()[0]
                     if field=="cloudcoverpercentage":
                         cloud=float((node.toxml()).split('>')[1].split('<')[0])
-                    print "cloud percentage = %5.2f %%"%cloud
+                        print "cloud percentage = %5.2f %%"%cloud
             else:
                 cloud=0
 
             print "===============================================\n"
 
 
-        #==================================download  whole product
-        if( cloud<options.max_cloud or (options.sentinel.find("S1")>=0)) and options.tile==None:
-            commande_wget='%s %s %s%s/%s "%s"'%(wg,auth,wg_opt,options.write_dir,filename+".zip",link)
-            #do not download the product if it was already downloaded and unzipped, or if no_download option was selected.
-            unzipped_file_exists= os.path.exists(("%s/%s")%(options.write_dir,filename))
-            print commande_wget
-            if unzipped_file_exists==False and options.no_download==False:
-                os.system(commande_wget)
-            else :
-                print unzipped_file_exists, options.no_download
+            #==================================download  whole product
+            if( cloud<options.max_cloud or (options.sentinel.find("S1")>=0)) and options.tile==None:
+                commande_wget='%s %s %s%s/%s "%s"'%(wg,auth,wg_opt,options.write_dir,filename+".zip",link)
+                #do not download the product if it was already downloaded and unzipped, or if no_download option was selected.
+                unzipped_file_exists= os.path.exists(("%s/%s")%(options.write_dir,filename))
+                print commande_wget
+                if unzipped_file_exists==False and options.no_download==False:
+                    os.system(commande_wget)
+                else :
+                    print unzipped_file_exists, options.no_download
 
         # download only one tile, file by file.
-        elif options.tile!=None:
+            elif options.tile!=None:
                 #do not download the product if the tile is already downloaded.
                 unzipped_tile_exists = False
                 if os.path.exists(("%s/%s")%(options.write_dir,filename)):
@@ -344,10 +361,10 @@ for i in range(len(request_list)):
                     os.system(commande_wget)
                     while os.path.getsize('file_dir.xml')==0 : #in case of "bad gateway error"
                         os.system(commande_wget)
-                    urls,types,names=get_elements('file_dir.xml')
+                    urls,types,names,length=get_elements('file_dir.xml')
                     #search for the xml file
                     for i in range(len(urls)):
-                        if names[i].find('SAFL1C')>0:
+                        if names[i].find('SAFL1C')>0 or names[i].find('MSIL1C')>0:
                             xml=names[i]
                             url_header=urls[i]
 
@@ -359,7 +376,7 @@ for i in range(len(request_list)):
                     os.system(commande_wget)
                     while os.path.getsize('granule_dir.xml')==0 : #in case of "bad gateway error"
                         os.system(commande_wget)
-                    urls,types,names=get_elements('granule_dir.xml')
+                    urls,types,names,length=get_elements('granule_dir.xml')
                     granule=None
                     #search for the tile
                     for i in range(len(urls)):
@@ -385,7 +402,6 @@ for i in range(len(request_list)):
                             os.mkdir(nom_rep_tuile)
                         # download product header file
                         print "############################################### header"
-                        url_header=url_header.replace("eu/odata","eu/apihub/odata")
                         commande_wget='%s %s %s%s "%s"'%(wg,auth,wg_opt,product_dir_name+'/'+xml,url_header+"/"+value)
                         print commande_wget
                         os.system(commande_wget)
@@ -434,6 +450,3 @@ for i in range(len(request_list)):
                             os.system(commande_wget)
                         download_tree(nom_rep_tuile,"granule.xml",wg,auth,wg_opt,value)
 
-
-        else :
-            print "too many clouds to download this product"
